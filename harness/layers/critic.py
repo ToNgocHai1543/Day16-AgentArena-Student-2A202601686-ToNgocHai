@@ -79,16 +79,67 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        if not isinstance(report, dict):
+            return report
+
+        claims = report.get("claims")
+        if not isinstance(claims, list):
+            return report
+
+        observed_text = getattr(ctx, "observed_text", "")
+        valid_claims = []
+        should_abstain = False
+
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text", "")
+
+            # 1. Nếu claim xuất hiện nguyên văn trong observed_text -> giữ nguyên
+            if text and text in observed_text:
+                valid_claims.append(claim)
+                continue
+
+            # 2. Thử tách câu ghép mâu thuẫn (trường hợp c: nối bằng " và ")
+            if text and " và " in text and ctx.corpus and hasattr(ctx.corpus, "docs"):
+                p1, p2 = text.split(" và ", 1)
+                if p1 in observed_text and p2 in observed_text:
+                    doc1 = next(
+                        (d for d in ctx.corpus.docs if d.body in observed_text and p1 in d.body),
+                        None,
+                    )
+                    doc2 = next(
+                        (d for d in ctx.corpus.docs if d.body in observed_text and p2 in d.body),
+                        None,
+                    )
+                    if doc1 and doc2 and doc1.doc_id != doc2.doc_id:
+                        valid_claims.append({"text": p1, "doc_id": doc1.doc_id})
+                        valid_claims.append({"text": p2, "doc_id": doc2.doc_id})
+                        should_abstain = True
+                        continue
+
+            # 3. Không tách được -> đây là claim bịa đặt, bỏ qua (không đưa vào valid_claims)
+
+        if should_abstain:
+            report["abstain"] = True
+
+        # 4. Nếu không còn claim nào: abstain = True, làm sạch claims/citations, viết lại answer
+        if not valid_claims:
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = "Không đủ tài liệu hoặc căn cứ để trả lời câu hỏi."
+        else:
+            report["claims"] = valid_claims
+            report["citations"] = sorted(
+                list(
+                    set(
+                        c["doc_id"]
+                        for c in valid_claims
+                        if isinstance(c, dict) and c.get("doc_id")
+                    )
+                )
+            )
+
+        return report
+
