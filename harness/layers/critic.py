@@ -70,6 +70,8 @@ Xem `harness/middleware.py` để biết thứ tự các hook.
 
 from __future__ import annotations
 
+import re
+
 from harness.middleware import Middleware
 
 
@@ -77,6 +79,9 @@ class Critic(Middleware):
     """Xoá những gì bằng chứng không đỡ; abstain khi không còn gì."""
 
     name = "critic"
+
+    # Danh sách các liên từ nối thường dùng khi mô hình ghép 2 câu mâu thuẫn
+    CONJUNCTIONS = (" và ", " nhưng ", " tuy nhiên ", ", trong khi ", "; ")
 
     def after_agent(self, ctx, report):
         if not isinstance(report, dict):
@@ -88,35 +93,45 @@ class Critic(Middleware):
 
         observed_text = getattr(ctx, "observed_text", "")
         valid_claims = []
-        should_abstain = False
+        should_abstain = bool(report.get("abstain", False))
 
         for claim in claims:
             if not isinstance(claim, dict):
                 continue
             text = claim.get("text", "")
+            if not text:
+                continue
 
-            # 1. Nếu claim xuất hiện nguyên văn trong observed_text -> giữ nguyên
-            if text and text in observed_text:
+            # 1. Nếu claim xuất hiện trong observed_text -> giữ nguyên (hợp lệ)
+            clean_text = text.replace("\r\n", "\n")
+            if text in observed_text or clean_text in observed_text:
                 valid_claims.append(claim)
                 continue
 
-            # 2. Thử tách câu ghép mâu thuẫn (trường hợp c: nối bằng " và ")
-            if text and " và " in text and ctx.corpus and hasattr(ctx.corpus, "docs"):
-                p1, p2 = text.split(" và ", 1)
-                if p1 in observed_text and p2 in observed_text:
-                    doc1 = next(
-                        (d for d in ctx.corpus.docs if d.body in observed_text and p1 in d.body),
-                        None,
-                    )
-                    doc2 = next(
-                        (d for d in ctx.corpus.docs if d.body in observed_text and p2 in d.body),
-                        None,
-                    )
-                    if doc1 and doc2 and doc1.doc_id != doc2.doc_id:
-                        valid_claims.append({"text": p1, "doc_id": doc1.doc_id})
-                        valid_claims.append({"text": p2, "doc_id": doc2.doc_id})
-                        should_abstain = True
-                        continue
+            # 2. Thử tách câu ghép mâu thuẫn (dùng regex hỗ trợ đa dạng liên từ: và, nhưng, tuy nhiên, trong khi, ;, xuống dòng)
+            split_success = False
+            if ctx.corpus and hasattr(ctx.corpus, "docs"):
+                parts = [p.strip() for p in re.split(r"\s+(?:và|nhưng|tuy\s+nhiên|trong\s+khi)\s+|;\s*|\n+", text, flags=re.IGNORECASE) if p.strip()]
+                if len(parts) >= 2:
+                    p1, p2 = parts[0], parts[1]
+                    if p1 in observed_text and p2 in observed_text:
+                        doc1 = next(
+                            (d for d in ctx.corpus.docs if d.body in observed_text and p1 in d.body),
+                            None,
+                        )
+                        doc2 = next(
+                            (d for d in ctx.corpus.docs if d.body in observed_text and p2 in d.body),
+                            None,
+                        )
+                        if doc1 and doc2 and doc1.doc_id != doc2.doc_id:
+                            valid_claims.append({"text": p1, "doc_id": doc1.doc_id})
+                            valid_claims.append({"text": p2, "doc_id": doc2.doc_id})
+                            should_abstain = True
+                            split_success = True
+
+            if split_success:
+                continue
+
 
             # 3. Không tách được -> đây là claim bịa đặt, bỏ qua (không đưa vào valid_claims)
 
@@ -142,4 +157,5 @@ class Critic(Middleware):
             )
 
         return report
+
 

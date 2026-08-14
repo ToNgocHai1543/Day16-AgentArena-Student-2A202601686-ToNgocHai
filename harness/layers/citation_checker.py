@@ -59,7 +59,34 @@ Xem `harness/middleware.py` để biết thứ tự các hook.
 
 from __future__ import annotations
 
+import re
+
 from harness.middleware import Middleware
+
+
+def _token_overlap(text: str, doc_body: str) -> float:
+    t1 = set(re.findall(r"\w+", text.lower()))
+    if not t1:
+        return 0.0
+    t2 = set(re.findall(r"\w+", doc_body.lower()))
+    return len(t1.intersection(t2)) / len(t1)
+
+
+def _is_line_supported(text: str, doc_body: str) -> bool:
+    """Kiểm tra xem câu trích dẫn có nằm trong một dòng nào của tài liệu không.
+    Hỗ trợ cả trường hợp text có dấu ngoặc kép hoặc khoảng trắng bao quanh."""
+    if not text or not doc_body:
+        return False
+    lines = doc_body.splitlines()
+    if any(text in line for line in lines):
+        return True
+    clean = text.strip()
+    if clean and any(clean in line for line in lines):
+        return True
+    unquoted = clean.strip("\"'«»“”‘’")
+    if len(unquoted) >= 12 and any(unquoted in line for line in lines):
+        return True
+    return False
 
 
 class CitationChecker(Middleware):
@@ -85,18 +112,23 @@ class CitationChecker(Middleware):
 
             # 1. Kiểm tra xem claim có nằm gọn trong một dòng của doc_id hiện tại không
             current_doc = ctx.corpus.get(doc_id) if doc_id else None
-            if current_doc and any(text in line for line in current_doc.body.splitlines()):
+            if current_doc and _is_line_supported(text, current_doc.body):
                 continue
 
-            # 2. Nếu không: tìm tài liệu trong corpus đã được quan sát chứa dòng có câu này
-            for doc in ctx.corpus.docs:
-                if doc.body in observed_text and any(text in line for line in doc.body.splitlines()):
-                    claim["doc_id"] = doc.doc_id
-                    break
-
+            # 2. Nếu không: tìm các tài liệu trong corpus đã quan sát hỗ trợ dòng này
+            candidates = [
+                doc
+                for doc in ctx.corpus.docs
+                if doc.body in observed_text and _is_line_supported(text, doc.body)
+            ]
+            if candidates:
+                # Chọn tài liệu có độ tương đồng từ vựng (Token Overlap) cao nhất
+                best_doc = max(candidates, key=lambda d: _token_overlap(text, d.body))
+                claim["doc_id"] = best_doc.doc_id
 
         # 3. Cập nhật lại danh sách citations đã sắp xếp
         citations = sorted(
+
             list(
                 set(
                     c["doc_id"]
@@ -107,4 +139,5 @@ class CitationChecker(Middleware):
         )
         report["citations"] = citations
         return report
+
 
